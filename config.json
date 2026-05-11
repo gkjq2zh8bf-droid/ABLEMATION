@@ -1,0 +1,35 @@
+{
+  "return_tracks": [
+    { "name": "A-BAND",  "output_target": "AudioOut/External/S0" },
+    { "name": "B-VOX",   "output_target": "AudioOut/External/S1" },
+    { "name": "C-CLICK", "output_target": "AudioOut/External/M4" },
+    { "name": "D-GUIDE", "output_target": "AudioOut/External/M5" },
+    { "name": "E-LTC",   "output_target": "AudioOut/External/M6" },
+    { "name": "F-BASS",  "output_target": "AudioOut/External/M7" },
+    { "name": "G-AG",    "output_target": "AudioOut/External/S4" },
+    { "name": "H-PERC",  "output_target": "AudioOut/External/S5" },
+    { "name": "I-EGTR",  "output_target": "AudioOut/External/S6" },
+    { "name": "J-HOOK",  "output_target": "AudioOut/External/S7" }
+  ],
+  "keyword_map": {
+    "A-BAND":  ["band", "synth", "keys", "keyboard", "pad", "piano", "organ", "strings", "fx"],
+    "B-VOX":   ["vox", "vocal", "lead", "bgv", "bgvs", "background", "choir", "bv"],
+    "C-CLICK": ["click", "metronome", "met"],
+    "D-GUIDE": ["guide", "ref", "reference", "scratch"],
+    "E-LTC":   ["ltc", "timecode", "tc", "smpte"],
+    "F-BASS":  ["bass", "sub"],
+    "G-AG":    ["ag", "acoustic"],
+    "H-PERC":  ["perc", "percussion", "drum", "loop", "conga", "shaker", "tamb", "bongo"],
+    "I-EGTR":  ["egtr", "electric", "elec", "e gtr"],
+    "J-HOOK":  ["hook", "feature", "solo", "vamp"]
+  },
+  "colors": {
+    "return_tracks": 16777215,
+    "sections_track": 0,
+    "master": 4980736
+  },
+  "send_unity": 1.0,
+  "send_min": 0.0003162277571,
+  "section_fallback_clips": ["Intro", "Verse 1", "Chorus 1", "Bridge", "Outro"],
+  "section_fallback_length_bars": 8
+}
