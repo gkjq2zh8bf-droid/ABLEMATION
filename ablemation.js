@@ -1,70 +1,115 @@
-// ABLEMATION v4.1 - Automated Ableton Session Setup
+// ABLEMATION v5.0 - Automated Ableton Session Setup
 // Max for Live JavaScript Device
 autowatch = 1;
 inlets  = 1;
-outlets = 2; // 0: status text,  1: failure summary / unmatched tracks
+outlets = 2; // 0: status text, 1: failure summary
 
-var VERSION = "4.1";
+var VERSION = "5.0";
 
-// Log file written after every run — Claude reads this directly (no copy-paste needed)
-var LOG_PATH = "/Users/apostoliccollectivestudio/Music/Ableton/User Library/Presets/MIDI Effects/Max MIDI Effect/ABLEMATION/ablemation-log.txt";
+// ─── Portable paths ───────────────────────────────────────────────────────────
+// Derived from the .amxd file location — works on any machine, any username.
+var DEVICE_FOLDER = "";
+try {
+    DEVICE_FOLDER = this.patcher.filepath.replace(/\/[^\/]+$/, "");
+} catch(e) {
+    post("[ABLEMATION] WARNING: could not determine device folder\n");
+}
+var CONFIG_PATH = DEVICE_FOLDER + "/config.json";
+var LOG_PATH    = DEVICE_FOLDER + "/ablemation-log.txt";
 
-// Runtime state — reset at start of each bang()
+// ─── Runtime state ────────────────────────────────────────────────────────────
 var _failures  = [];
 var _logBuffer = [];
+var _delTask   = null;  // module-scope prevents GC during async locator cleanup
 
 post("[ABLEMATION] ablemation.js v" + VERSION + " loaded\n");
 
+// ─── Defaults (overridden by config.json on load) ─────────────────────────────
+// These match the standard MultiTracks.com church production setup.
+// To customize for your rig, edit config.json — do not edit these directly.
+
+var RETURN_TRACKS = [
+    { name: "BAND",  channel: "1"  },
+    { name: "VOX",   channel: "3"  },
+    { name: "CLICK", channel: "5"  },
+    { name: "GUIDE", channel: "6"  },
+    { name: "LTC",   channel: "7"  },
+    { name: "BASS",  channel: "8"  },
+    { name: "AG",    channel: "9"  },
+    { name: "PERC",  channel: "11" },
+    { name: "EGTR",  channel: "13" },
+    { name: "HOOK",  channel: "15" }
+];
+
+// Ordered array — first match wins, so put more specific entries before general ones.
+// Uses word-boundary matching, so short keywords like "ag" won't hit "Stage".
+var KEYWORD_MAP = [
+    { "return": "BAND",  keywords: ["band", "synth", "keys", "keyboard", "pad", "piano", "organ", "strings", "fx", "rhodes", "wurli", "clav"] },
+    { "return": "VOX",   keywords: ["vox", "vocal", "lead", "bgv", "bgvs", "background", "choir", "bv"] },
+    { "return": "CLICK", keywords: ["click", "metronome", "met"] },
+    { "return": "GUIDE", keywords: ["guide", "ref", "reference", "scratch"] },
+    { "return": "LTC",   keywords: ["ltc", "timecode", "smpte"] },
+    { "return": "BASS",  keywords: ["bass", "sub"] },
+    { "return": "AG",    keywords: ["ag", "acoustic"] },
+    { "return": "PERC",  keywords: ["perc", "percussion", "drum", "loop", "conga", "shaker", "tamb", "bongo"] },
+    { "return": "EGTR",  keywords: ["egtr", "electric", "elec"] },
+    { "return": "HOOK",  keywords: ["hook", "feature", "solo", "vamp"] }
+];
+
+var COLOR_RETURN   = 16777215;  // 0xFFFFFF — return tracks
+var COLOR_MASTER   = 11672627;  // 0xB21E33 — master track (dark red)
+var COLOR_SECTIONS = 0;         // 0x000000 — SECTIONS track and clips
+
+var SEND_UNITY = 1.0;
+var SEND_OFF   = 0;
+
+var FALLBACK_SECTIONS = ["Intro", "Verse 1", "Chorus 1", "Bridge", "Outro"];
+
+// ─── Config loader ────────────────────────────────────────────────────────────
+// Reads config.json from the device folder on every load.
+// Only overrides values explicitly present in the file — missing keys keep defaults.
+
+function loadConfig() {
+    try {
+        var f = new File(CONFIG_PATH, "read");
+        if (!f.isopen) {
+            post("[ABLEMATION] No config.json found — using built-in defaults\n");
+            return;
+        }
+        var raw = f.readstring(65536);
+        f.close();
+
+        var cfg = JSON.parse(raw);
+
+        if (Array.isArray(cfg.returnTracks)    && cfg.returnTracks.length > 0)    RETURN_TRACKS     = cfg.returnTracks;
+        if (Array.isArray(cfg.keywordMap)       && cfg.keywordMap.length > 0)      KEYWORD_MAP       = cfg.keywordMap;
+        if (Array.isArray(cfg.fallbackSections) && cfg.fallbackSections.length > 0) FALLBACK_SECTIONS = cfg.fallbackSections;
+        if (cfg.colors) {
+            if (cfg.colors.returnTracks  !== undefined) COLOR_RETURN   = cfg.colors.returnTracks;
+            if (cfg.colors.masterTrack   !== undefined) COLOR_MASTER   = cfg.colors.masterTrack;
+            if (cfg.colors.sectionsTrack !== undefined) COLOR_SECTIONS = cfg.colors.sectionsTrack;
+        }
+
+        post("[ABLEMATION] config.json loaded from " + CONFIG_PATH + "\n");
+    } catch(e) {
+        post("[ABLEMATION] config.json error: " + e.message + " — using defaults\n");
+    }
+}
+
 function loadbang() {
+    loadConfig();
     outlet(0, "v" + VERSION + " — click SETUP SESSION to begin");
 }
 
-// ─── Config ───────────────────────────────────────────────────────────────────
-
-var RETURN_TRACKS = [
-    { name: "BAND",  channel: "1"  },   // → Ext. Out 1/2
-    { name: "VOX",   channel: "3"  },   // → Ext. Out 3/4
-    { name: "CLICK", channel: "5"  },   // → Ext. Out 5
-    { name: "GUIDE", channel: "6"  },   // → Ext. Out 6
-    { name: "LTC",   channel: "7"  },   // → Ext. Out 7
-    { name: "BASS",  channel: "8"  },   // → Ext. Out 8
-    { name: "AG",    channel: "9"  },   // → Ext. Out 9/10
-    { name: "PERC",  channel: "11" },   // → Ext. Out 11/12
-    { name: "EGTR",  channel: "13" },   // → Ext. Out 13/14
-    { name: "HOOK",  channel: "15" }    // → Ext. Out 15/16
-];
-
-var CUE_CHANNEL = "5";  // Cue/headphone output → same hardware channel as CLICK
-
-var KEYWORD_MAP = {
-    "BAND":  ["band", "synth", "keys", "keyboard", "pad", "piano", "organ", "strings", "fx", "rhodes", "wurli", "clav"],
-    "VOX":   ["vox", "vocal", "lead", "bgv", "bgvs", "background", "choir", "bv"],
-    "CLICK": ["click", "metronome", "met"],
-    "GUIDE": ["guide", "ref", "reference", "scratch"],
-    "LTC":   ["ltc", "timecode", "tc", "smpte"],
-    "BASS":  ["bass", "sub"],
-    "AG":    ["ag", "acoustic"],
-    "PERC":  ["perc", "percussion", "drum", "loop", "conga", "shaker", "tamb", "bongo"],
-    "EGTR":  ["egtr", "electric", "elec", "e gtr"],
-    "HOOK":  ["hook", "feature", "solo", "vamp"]
-};
-
-var COLOR_WHITE    = 16777215;  // 0xFFFFFF
-var COLOR_BLACK    = 0;         // 0x000000
-var COLOR_DARK_RED = 11672627;  // 0xB21E33
-
-var SEND_UNITY = 1.0;
-var SEND_MIN   = 0.0003162277571;  // Ableton's minimum (not zero)
-
 // ─── Logging ──────────────────────────────────────────────────────────────────
 
-// Internal: Max Console + log buffer (no outlet update)
+function pad2(n) { return n < 10 ? "0" + n : "" + n; }
+
 function appendLog(msg) {
     post("[ABLEMATION] " + msg + "\n");
     _logBuffer.push(msg);
 }
 
-// User-facing: Max Console + log buffer + status outlet
 function log(msg) {
     post("[ABLEMATION] " + msg + "\n");
     _logBuffer.push(msg);
@@ -76,24 +121,17 @@ function reportFailure(msg) {
     appendLog("FAIL: " + msg);
 }
 
-// Write full run log to disk so it can be read without copy-paste
 function flushLog() {
-    var d = new Date();
-    var timestamp = d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate() +
-                    " " + d.getHours() + ":" + d.getMinutes() + ":" + d.getSeconds();
-    var header  = "=== ABLEMATION v" + VERSION + " — " + timestamp + " ===";
-    var content = header + "\n" + _logBuffer.join("\n") + "\n";
+    var d  = new Date();
+    var ts = d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) +
+             " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
+    var content = "=== ABLEMATION v" + VERSION + " — " + ts + " ===\n" + _logBuffer.join("\n") + "\n";
     try {
         var f = new File(LOG_PATH, "write");
-        if (f.isopen) {
-            f.writestring(content);
-            f.close();
-            post("[ABLEMATION] Log saved: " + LOG_PATH + "\n");
-        } else {
-            post("[ABLEMATION] WARNING: Could not open log file for writing\n");
-        }
+        if (f.isopen) { f.writestring(content); f.close(); }
+        else post("[ABLEMATION] WARNING: could not write log to " + LOG_PATH + "\n");
     } catch(e) {
-        post("[ABLEMATION] Log write error: " + e.message + "\n");
+        post("[ABLEMATION] Log error: " + e.message + "\n");
     }
 }
 
@@ -101,24 +139,7 @@ function flushLog() {
 
 function ls() { return new LiveAPI("live_set"); }
 
-function extractIds(raw) {
-    var ids = [];
-    if (!raw) return ids;
-    for (var i = 0; i < raw.length; i++) {
-        if (typeof raw[i] === "number" && raw[i] > 0) ids.push(raw[i]);
-    }
-    return ids;
-}
-
-function getDisplayName(id) {
-    var obj = new LiveAPI("id " + id);
-    var dn  = obj.get("display_name");
-    if (!dn) return "";
-    if (typeof dn === "string") return dn.trim();
-    return dn.length ? String(dn[0]).trim() : "";
-}
-
-// Match a channel display_name by leading digits — interface-agnostic
+// Match a channel display_name by leading digits — interface-agnostic.
 // "7" matches "7", "7 LTC", "7/8", "Output 7", etc.
 function channelMatchesTarget(displayName, targetLeadingNum) {
     var dn  = String(displayName).trim();
@@ -129,9 +150,8 @@ function channelMatchesTarget(displayName, targetLeadingNum) {
 
 // ─── Output Routing (Live 12 API) ────────────────────────────────────────────
 //
-// Live 12 routing LOM: properties live on Track (not mixer_device).
-// GET returns a single-element array containing a JSON string:
-//   raw[0] = '{"available_output_routing_types": [{...}, ...]}'
+// Live 12: routing properties live on Track, not mixer_device.
+// GET returns a JSON string inside a 1-element array.
 // SET requires the full JSON object as a string — integer identifiers fail silently.
 
 function parseRoutingJson(raw, key) {
@@ -162,10 +182,7 @@ function setExtOutput(trackPath, targetLeadingNum) {
     }
 
     if (!extObj) {
-        appendLog("WARNING: No Ext.Out type for " + trackPath);
-        for (var i = 0; i < types.length; i++) {
-            appendLog("  type available: '" + types[i].display_name + "' id=" + types[i].identifier);
-        }
+        appendLog("No Ext.Out type for " + trackPath + ". Available: " + JSON.stringify(types));
         return false;
     }
 
@@ -182,10 +199,7 @@ function setExtOutput(trackPath, targetLeadingNum) {
     }
 
     if (!chObj) {
-        appendLog("WARNING: No channel matching '" + targetLeadingNum + "' for " + trackPath);
-        for (var j = 0; j < channels.length; j++) {
-            appendLog("  channel available: '" + channels[j].display_name + "' id=" + channels[j].identifier);
-        }
+        appendLog("No channel '" + targetLeadingNum + "' for " + trackPath + ". Available: " + JSON.stringify(channels));
         return false;
     }
 
@@ -198,7 +212,7 @@ function setSendsOnly(trackPath) {
     var types       = parseRoutingJson(track.get("available_output_routing_types"), "available_output_routing_types");
     var sendsNames  = ["sends only", "sends", "no output", "none", "---"];
     var masterNames = ["master", "main"];
-    var firstNonMasterType = null;
+    var firstNonMaster = null;
 
     for (var i = 0; i < types.length; i++) {
         var dn = String(types[i].display_name || "").toLowerCase();
@@ -208,32 +222,48 @@ function setSendsOnly(trackPath) {
                 return true;
             }
         }
-        if (!firstNonMasterType && dn !== "") {
+        if (!firstNonMaster && dn !== "") {
             var isMaster = false;
             for (var m = 0; m < masterNames.length; m++) {
                 if (dn.indexOf(masterNames[m]) !== -1) { isMaster = true; break; }
             }
-            if (!isMaster) firstNonMasterType = types[i];
+            if (!isMaster) firstNonMaster = types[i];
         }
     }
 
-    if (firstNonMasterType) {
-        track.set("output_routing_type", JSON.stringify(firstNonMasterType));
+    if (firstNonMaster) {
+        track.set("output_routing_type", JSON.stringify(firstNonMaster));
         return true;
     }
     return false;
 }
 
-// ─── Track / Name helpers ─────────────────────────────────────────────────────
+// ─── Track matching ───────────────────────────────────────────────────────────
 
+function escapeRe(s) {
+    return s.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
+}
+
+// Match a track name to a return bus.
+// KEYWORD_MAP is an ordered array — first match wins.
+// Uses surroundings-based word boundary: keyword must be preceded and followed
+// by a non-alphanumeric character (or string edge). Prevents "Stage" matching "ag",
+// "Match" matching "tc", etc.
 function matchTrackToReturn(trackName) {
     var lower = trackName.toLowerCase().trim();
+
+    // Tracks starting with "EG" + space/digit always go to EGTR ("E GTR", "EG 1", etc.)
     if (/^eg[\s\d]/.test(lower)) return "EGTR";
-    for (var r in KEYWORD_MAP) {
-        if (!KEYWORD_MAP.hasOwnProperty(r)) continue;
-        var kws = KEYWORD_MAP[r];
-        for (var k = 0; k < kws.length; k++) {
-            if (lower.indexOf(kws[k]) !== -1) return r;
+
+    for (var i = 0; i < KEYWORD_MAP.length; i++) {
+        var entry    = KEYWORD_MAP[i];
+        var retName  = entry["return"] || "";
+        var keywords = entry.keywords  || [];
+
+        for (var k = 0; k < keywords.length; k++) {
+            var escaped = escapeRe(keywords[k].toLowerCase());
+            var re      = new RegExp("(?:^|[^a-z0-9])" + escaped + "(?:[^a-z0-9]|$)");
+            if (re.test(lower)) return retName;
         }
     }
     return null;
@@ -256,9 +286,10 @@ function readCuePoints() {
         var cp      = new LiveAPI("live_set cue_points " + i);
         var nameArr = cp.get("name");
         var timeArr = cp.get("time");
-        var cpName  = (nameArr && nameArr.length) ? String(nameArr[0]).trim() : "";
-        var cpTime  = (timeArr && timeArr.length) ? parseFloat(timeArr[0])   : 0;
-        cues.push({ name: cpName, time: cpTime });
+        cues.push({
+            name: (nameArr && nameArr.length) ? String(nameArr[0]).trim() : "",
+            time: (timeArr && timeArr.length) ? parseFloat(timeArr[0])   : 0
+        });
     }
     cues.sort(function(a, b) { return a.time - b.time; });
     appendLog("Read " + count + " cue points");
@@ -271,8 +302,7 @@ function getActualSongEnd(liveSet, beatsPerBar) {
     for (var t = 0; t < trackCount; t++) {
         var tr   = new LiveAPI("live_set tracks " + t);
         var nArr = tr.get("name");
-        var name = nArr ? String(nArr[0]).toUpperCase() : "";
-        if (name === "SECTIONS") continue;
+        if (nArr && String(nArr[0]).toUpperCase() === "SECTIONS") continue;
 
         var clipCount = tr.getcount("arrangement_clips");
         for (var c = 0; c < clipCount; c++) {
@@ -282,19 +312,16 @@ function getActualSongEnd(liveSet, beatsPerBar) {
             if (endArr && endArr.length > 0 && parseFloat(endArr[0]) > 0) {
                 clipEnd = parseFloat(endArr[0]);
             } else {
-                var startArr = clip.get("start_time");
-                var lenArr   = clip.get("length");
-                if (startArr && startArr.length > 0 && lenArr && lenArr.length > 0) {
-                    clipEnd = parseFloat(startArr[0]) + parseFloat(lenArr[0]);
+                var sArr = clip.get("start_time");
+                var lArr = clip.get("length");
+                if (sArr && sArr.length > 0 && lArr && lArr.length > 0) {
+                    clipEnd = parseFloat(sArr[0]) + parseFloat(lArr[0]);
                 }
             }
             if (clipEnd > actualEnd) actualEnd = clipEnd;
         }
     }
-    if (actualEnd > 0) {
-        var bars = Math.ceil(actualEnd / beatsPerBar);
-        return (bars + 1) * beatsPerBar;
-    }
+    if (actualEnd > 0) return (Math.ceil(actualEnd / beatsPerBar) + 1) * beatsPerBar;
     return 256;
 }
 
@@ -304,20 +331,17 @@ function step0_cleanup() {
     var liveSet = ls();
     var count   = liveSet.getcount("return_tracks");
     log("Step 0: Removing " + count + " existing return track(s)...");
-    for (var i = count - 1; i >= 0; i--) {
-        liveSet.call("delete_return_track", i);
-    }
+    for (var i = count - 1; i >= 0; i--) liveSet.call("delete_return_track", i);
 }
 
-// ─── Step 1: Create 10 return tracks ─────────────────────────────────────────
+// ─── Step 1: Create return tracks ────────────────────────────────────────────
 
 function step1_createReturns() {
-    log("Step 1: Creating return tracks...");
+    log("Step 1: Creating " + RETURN_TRACKS.length + " return tracks...");
     var liveSet = ls();
     for (var i = 0; i < RETURN_TRACKS.length; i++) {
         liveSet.call("create_return_track");
-        var rt = new LiveAPI("live_set return_tracks " + i);
-        rt.set("name", RETURN_TRACKS[i].name);
+        new LiveAPI("live_set return_tracks " + i).set("name", RETURN_TRACKS[i].name);
     }
 }
 
@@ -326,11 +350,9 @@ function step1_createReturns() {
 function step2_colorTracks() {
     log("Step 2: Applying colors...");
     for (var i = 0; i < RETURN_TRACKS.length; i++) {
-        var rt = new LiveAPI("live_set return_tracks " + i);
-        rt.set("color", COLOR_WHITE);
+        new LiveAPI("live_set return_tracks " + i).set("color", COLOR_RETURN);
     }
-    var master = new LiveAPI("live_set master_track");
-    master.set("color", COLOR_DARK_RED);
+    new LiveAPI("live_set master_track").set("color", COLOR_MASTER);
 }
 
 // ─── Step 3: Route return tracks to hardware outputs ──────────────────────────
@@ -338,8 +360,7 @@ function step2_colorTracks() {
 function step3_routeOutputs() {
     log("Step 3: Routing return tracks to hardware outputs...");
     for (var i = 0; i < RETURN_TRACKS.length; i++) {
-        var path = "live_set return_tracks " + i;
-        var ok   = setExtOutput(path, RETURN_TRACKS[i].channel);
+        var ok = setExtOutput("live_set return_tracks " + i, RETURN_TRACKS[i].channel);
         if (!ok) {
             log("  WARNING: " + RETURN_TRACKS[i].name + " routing failed");
             reportFailure(RETURN_TRACKS[i].name + " output routing failed");
@@ -348,17 +369,13 @@ function step3_routeOutputs() {
     log("  Step 3 done.");
 }
 
-// ─── Step 3b: Cue output notice ───────────────────────────────────────────────
-//
-// The Cue Out hardware routing dropdown is NOT exposed in the Live 12 LOM.
-// Confirmed via official Cycling '74 LOM docs and AbletonOSC source.
-// No property on Song, master_track, or MixerDevice gives access to it.
-// The user must set this manually in the master track mixer.
+// ─── Step 3b: Cue Out notice ──────────────────────────────────────────────────
+// Cue Out hardware routing is NOT exposed in the Live 12 LOM.
+// Confirmed: Cycling '74 docs + AbletonOSC source. Cannot be automated.
 
-function step3b_routeCueOutput() {
-    log("Step 3b: CUE OUT must be set manually.");
-    appendLog("Step 3b: Cue Out routing is not accessible in the Live 12 LOM (confirmed, not a bug).");
-    appendLog("Step 3b: User action required: in master track mixer, set Cue Out to Ext. Out 5.");
+function step3b_warnCueOut() {
+    log("Step 3b: Set CUE OUT manually in master track mixer.");
+    appendLog("Cue Out: not accessible in Live 12 LOM — user must set manually.");
 }
 
 // ─── Step 4: Audio tracks → Sends Only + route sends ─────────────────────────
@@ -389,21 +406,19 @@ function step4_routeSends() {
 
         for (var s = 0; s < returnCount; s++) {
             var send = new LiveAPI("live_set tracks " + i + " mixer_device sends " + s);
-            send.set("value", s === returnIdx ? SEND_UNITY : SEND_MIN);
+            send.set("value", s === returnIdx ? SEND_UNITY : SEND_OFF);
         }
 
         if (returnIdx === -1) {
             unmatched.push(trackName);
-            reportFailure("Track \"" + trackName + "\" — no keyword match, send not assigned");
+            reportFailure("\"" + trackName + "\" unmatched — add keyword to config.json");
         } else {
             matched++;
         }
     }
 
     appendLog("Step 4: matched=" + matched + " unmatched=" + unmatched.length);
-    if (unmatched.length > 0) {
-        appendLog("  Unmatched tracks: " + unmatched.join(", "));
-    }
+    if (unmatched.length > 0) appendLog("  Unmatched: " + unmatched.join(", "));
     log("  Matched: " + matched + " | Unmatched: " + unmatched.length);
 }
 
@@ -415,9 +430,9 @@ function step5_createSections() {
     var trackCount = liveSet.getcount("tracks");
 
     for (var i = 0; i < trackCount; i++) {
-        var tr      = new LiveAPI("live_set tracks " + i);
-        var nameArr = tr.get("name");
-        if (nameArr && String(nameArr[0]).toUpperCase() === "SECTIONS") {
+        var tr = new LiveAPI("live_set tracks " + i);
+        var n  = tr.get("name");
+        if (n && String(n[0]).toUpperCase() === "SECTIONS") {
             liveSet.call("delete_track", i);
             break;
         }
@@ -426,14 +441,14 @@ function step5_createSections() {
     liveSet.call("create_midi_track", 0);
     var sections = new LiveAPI("live_set tracks 0");
     sections.set("name", "SECTIONS");
-    sections.set("color", COLOR_BLACK);
+    sections.set("color", COLOR_SECTIONS);
     log("  Step 5 done.");
 }
 
-// ─── Step 6: Create ARRANGEMENT clips from cue points ─────────────────────────
+// ─── Step 6: Build arrangement clips from cue points ──────────────────────────
 
 function step6_buildArrangementClips(cues) {
-    log("Step 6: Building arrangement clips on SECTIONS track...");
+    log("Step 6: Building arrangement clips...");
     var liveSet     = ls();
     var sigNum      = liveSet.get("signature_numerator");
     var beatsPerBar = (sigNum && sigNum.length) ? parseInt(sigNum[0]) : 4;
@@ -444,10 +459,7 @@ function step6_buildArrangementClips(cues) {
     for (var t = 0; t < trackCount; t++) {
         var tr = new LiveAPI("live_set tracks " + t);
         var n  = tr.get("name");
-        if (n && String(n[0]).toUpperCase() === "SECTIONS") {
-            sectionsIdx = t;
-            break;
-        }
+        if (n && String(n[0]).toUpperCase() === "SECTIONS") { sectionsIdx = t; break; }
     }
 
     if (sectionsIdx === -1) {
@@ -462,13 +474,9 @@ function step6_buildArrangementClips(cues) {
     }
 
     if (clips.length === 0) {
-        clips = [
-            { name: "Intro",    time: 0 },
-            { name: "Verse 1",  time: fallbackLen },
-            { name: "Chorus 1", time: fallbackLen * 2 },
-            { name: "Bridge",   time: fallbackLen * 3 },
-            { name: "Outro",    time: fallbackLen * 4 }
-        ];
+        for (var fs = 0; fs < FALLBACK_SECTIONS.length; fs++) {
+            clips.push({ name: FALLBACK_SECTIONS[fs], time: fallbackLen * fs });
+        }
     }
 
     var sectionsTrack = new LiveAPI("live_set tracks " + sectionsIdx);
@@ -487,7 +495,7 @@ function step6_buildArrangementClips(cues) {
             var startArr = c.get("start_time");
             if (startArr && startArr.length > 0 && Math.abs(parseFloat(startArr[0]) - startBeat) < 0.5) {
                 c.set("name", clips[j].name);
-                c.set("color", COLOR_BLACK);
+                c.set("color", COLOR_SECTIONS);
                 break;
             }
         }
@@ -498,13 +506,10 @@ function step6_buildArrangementClips(cues) {
 
 // ─── Step 7: Replace locators with song title + STOP ──────────────────────────
 //
-// Live 12 LOM: set_or_delete_cue() is the only way to create/delete locators.
-// It toggles at current_song_time: locator exists there → deletes; none → creates.
-//
-// CRITICAL: calling set_or_delete_cue in a tight loop silently does nothing —
-// Live 12 only processes it when the JS thread yields. Solution: use a repeating
-// Task (50ms interval) that fires once per deletion, giving Live time to process
-// each toggle before the next one. Step 7 is therefore async and takes a callback.
+// Live 12 locator API: set_or_delete_cue() toggles a locator at current_song_time.
+// CRITICAL: rapid-fire calls in a loop silently fail — Live 12 only processes one
+// per event-loop tick. _delTask is module-scope to prevent garbage collection
+// from killing the loop mid-run.
 
 function step7_replaceLocators(cues, onDone) {
     log("Step 7: Replacing locators...");
@@ -522,7 +527,7 @@ function step7_replaceLocators(cues, onDone) {
     var sigNum      = liveSet.get("signature_numerator");
     var beatsPerBar = (sigNum && sigNum.length) ? parseInt(sigNum[0]) : 4;
     var stopBeat    = getActualSongEnd(liveSet, beatsPerBar);
-    appendLog("Step 7: song end (STOP) = beat " + stopBeat);
+    appendLog("Step 7: title=\"" + songTitle + "\" STOP=beat " + stopBeat);
 
     var savedTimeRaw = liveSet.get("current_song_time");
     var savedTime    = (savedTimeRaw && savedTimeRaw !== 0 && savedTimeRaw.length > 0)
@@ -531,91 +536,84 @@ function step7_replaceLocators(cues, onDone) {
     var wasPlayingRaw = liveSet.get("is_playing");
     if (wasPlayingRaw && wasPlayingRaw[0] === 1) liveSet.call("stop_playing");
 
-    // Build queue of beat times to delete
     var deleteQueue = [];
     for (var i = 0; i < cues.length; i++) deleteQueue.push(cues[i].time);
-    appendLog("Step 7: " + deleteQueue.length + " locators to delete");
+    appendLog("Step 7: " + deleteQueue.length + " locators queued for deletion");
 
     var deleteIdx = 0;
 
-    // After all deletes, create the two new locators
     function runCreate() {
-        var remaining = liveSet.getcount("cue_points");
-        appendLog("Step 7: " + remaining + " remain after delete pass");
+        appendLog("Step 7: " + liveSet.getcount("cue_points") + " remain after delete pass");
 
-        // Beat 0 — song title
+        // Create song title locator at beat 0
         var pre0 = liveSet.getcount("cue_points");
         liveSet.set("current_song_time", 0.0);
         liveSet.call("set_or_delete_cue");
         var post0 = liveSet.getcount("cue_points");
-        appendLog("Step 7: count " + pre0 + " -> " + post0 + " at beat 0");
+        appendLog("Step 7: beat-0 count " + pre0 + " -> " + post0);
 
         if (post0 > pre0) {
             for (var j = 0; j < post0; j++) {
-                var cp0   = new LiveAPI("live_set cue_points " + j);
-                var tArr0 = cp0.get("time");
-                if (tArr0 && tArr0 !== 0 && tArr0.length > 0 && Math.abs(parseFloat(tArr0[0])) < 0.5) {
+                var cp0 = new LiveAPI("live_set cue_points " + j);
+                var t0  = cp0.get("time");
+                if (t0 && t0 !== 0 && t0.length > 0 && Math.abs(parseFloat(t0[0])) < 0.5) {
                     cp0.set("name", songTitle);
                     break;
                 }
             }
         } else {
-            appendLog("Step 7: WARNING — beat 0 toggle did not create (locator may already exist there)");
             reportFailure("Song title locator not created at beat 0");
         }
 
-        // stopBeat — STOP
+        // Create STOP locator at actual song end
         var preS = liveSet.getcount("cue_points");
         liveSet.set("current_song_time", stopBeat);
         liveSet.call("set_or_delete_cue");
         var postS = liveSet.getcount("cue_points");
-        appendLog("Step 7: count " + preS + " -> " + postS + " at beat " + stopBeat);
+        appendLog("Step 7: stop-beat count " + preS + " -> " + postS);
 
         if (postS > preS) {
             for (var k = 0; k < postS; k++) {
-                var cpS   = new LiveAPI("live_set cue_points " + k);
-                var tArrS = cpS.get("time");
-                if (tArrS && tArrS !== 0 && tArrS.length > 0 && Math.abs(parseFloat(tArrS[0]) - stopBeat) < 0.5) {
+                var cpS = new LiveAPI("live_set cue_points " + k);
+                var tS  = cpS.get("time");
+                if (tS && tS !== 0 && tS.length > 0 && Math.abs(parseFloat(tS[0]) - stopBeat) < 0.5) {
                     cpS.set("name", "STOP");
                     break;
                 }
             }
         } else {
-            appendLog("Step 7: WARNING — stopBeat toggle did not create (existing locator there deleted instead)");
-            reportFailure("STOP locator not created — existing locator was at beat " + stopBeat);
+            reportFailure("STOP locator not created at beat " + stopBeat);
         }
 
-        // Restore cursor
         liveSet.set("current_song_time", savedTime);
-
-        log("  \"" + songTitle + "\" at beat 0 | STOP at beat " + stopBeat + " | final count: " + liveSet.getcount("cue_points"));
+        log("  \"" + songTitle + "\" + STOP | final count: " + liveSet.getcount("cue_points"));
         if (onDone) onDone();
     }
 
-    // Repeating Task: one deletion per tick (50ms) so Live processes each toggle
-    var delTask = new Task(function() {
+    _delTask = new Task(function() {
         if (deleteIdx < deleteQueue.length) {
             liveSet.set("current_song_time", deleteQueue[deleteIdx]);
             liveSet.call("set_or_delete_cue");
             appendLog("  del[" + deleteIdx + "] beat=" + deleteQueue[deleteIdx] + " remain=" + liveSet.getcount("cue_points"));
             deleteIdx++;
         } else {
-            delTask.cancel();
+            _delTask.cancel();
+            _delTask = null;
             runCreate();
         }
     });
-    delTask.interval = 50;
-    delTask.repeat();
+    _delTask.interval = 50;
+    _delTask.repeat();
 }
 
-// ─── Main bang ────────────────────────────────────────────────────────────────
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
 function bang() {
+    // Cancel any in-flight locator task from a previous run
+    if (_delTask) { _delTask.cancel(); _delTask = null; }
+
     var liveSet = ls();
-    if (!liveSet || liveSet.id == 0) {
-        log("ERROR: No Ableton session.");
-        return;
-    }
+    if (!liveSet || liveSet.id == 0) { log("ERROR: No Ableton session."); return; }
 
     _failures  = [];
     _logBuffer = [];
@@ -624,32 +622,30 @@ function bang() {
 
     var cues = readCuePoints();
 
-    // Steps 0-6 run synchronously, then step7 runs async (Task-per-deletion).
-    // Completion logging happens in the step7 callback so the log is complete.
+    // Steps 0-6 run synchronously. Step 7 is async (50ms/locator Task).
+    // Completion callback handles log flush and failure summary.
     var t = new Task(function() {
         try {
             step0_cleanup();
             step1_createReturns();
             step2_colorTracks();
             step3_routeOutputs();
-            step3b_routeCueOutput();
+            step3b_warnCueOut();
             step4_routeSends();
             step5_createSections();
             step6_buildArrangementClips(cues);
         } catch(e) {
-            log("ERROR in setup: " + e.message);
+            log("ERROR: " + e.message);
             appendLog("Stack: " + (e.stack || "none"));
-            reportFailure("Setup error: " + e.message);
+            reportFailure("Unexpected error: " + e.message);
         }
 
         step7_replaceLocators(cues, function() {
             log("DONE.");
             flushLog();
-            if (_failures.length === 0) {
-                outlet(1, "All steps completed successfully.");
-            } else {
-                outlet(1, "Issues (" + _failures.length + "): " + _failures.join(" | "));
-            }
+            outlet(1, _failures.length === 0
+                ? "All steps completed successfully."
+                : "Issues (" + _failures.length + "): " + _failures.join(" | "));
         });
     });
     t.interval = 0;

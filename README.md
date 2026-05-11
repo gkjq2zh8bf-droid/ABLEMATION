@@ -1,6 +1,6 @@
 # ABLEMATION
 
-One-click setup for church multitrack sessions in Ableton Live 12.
+**v5.0** — One-click setup for church multitrack sessions in Ableton Live 12.
 
 Every [MultiTracks.com](https://multitracks.com) song download drops into Ableton with the same tedious manual work — wrong return tracks, no routing, no sections, cluttered locators. ABLEMATION handles all of it in a single button press.
 
@@ -17,13 +17,14 @@ Every [MultiTracks.com](https://multitracks.com) song download drops into Ableto
 
 1. Download this repository (green **Code** button → **Download ZIP**)
 2. Unzip it
-3. Copy the three files into your Ableton User Library:
+3. Copy the four files into your Ableton User Library:
 
 ```
 ~/Music/Ableton/User Library/Presets/MIDI Effects/Max MIDI Effect/ABLEMATION/
     ABLEMATION.amxd
     ablemation.js
     config.json
+    LICENSE
 ```
 
 > If the `ABLEMATION` folder doesn't exist, create it.
@@ -40,7 +41,7 @@ When you click **SETUP SESSION**:
 1. Deletes any existing return tracks (MultiTracks ships with generic Reverb/Delay defaults)
 2. Creates 10 return tracks: **BAND, VOX, CLICK, GUIDE, LTC, BASS, AG, PERC, EGTR, HOOK**
 3. Colors return tracks white, master track dark red
-4. Routes each return track to the correct hardware output (interface-agnostic — works with Dante Virtual Sound Card, Antelope Galaxy 32, and others)
+4. Routes each return track to the correct hardware output (interface-agnostic — see below)
 5. Sets all audio tracks to **Sends Only**
 6. Routes each audio track's send to the correct return bus via keyword matching
 7. Creates a **SECTIONS** MIDI track at the top with arrangement clips for each song section
@@ -48,22 +49,24 @@ When you click **SETUP SESSION**:
 
 ---
 
-## Hardware Output Map
+## Hardware Output Routing
 
-| Return | Output |
-|--------|--------|
-| BAND | Ext. Out 1/2 |
-| VOX | Ext. Out 3/4 |
-| CLICK | Ext. Out 5 |
-| GUIDE | Ext. Out 6 |
-| LTC | Ext. Out 7 |
-| BASS | Ext. Out 8 |
-| AG | Ext. Out 9/10 |
-| PERC | Ext. Out 11/12 |
-| EGTR | Ext. Out 13/14 |
-| HOOK | Ext. Out 15/16 |
+Routing is **interface-agnostic** — it matches by the leading channel number in the output name, so it works with any audio interface (Dante Virtual Sound Card, Antelope Galaxy 32, RME, MOTU, etc.).
 
-Routing matches by leading channel number, so it works regardless of what your interface calls the outputs.
+| Return | Output      | Leading # |
+|--------|-------------|-----------|
+| BAND   | Ext. Out 1/2  | 1  |
+| VOX    | Ext. Out 3/4  | 3  |
+| CLICK  | Ext. Out 5    | 5  |
+| GUIDE  | Ext. Out 6    | 6  |
+| LTC    | Ext. Out 7    | 7  |
+| BASS   | Ext. Out 8    | 8  |
+| AG     | Ext. Out 9/10 | 9  |
+| PERC   | Ext. Out 11/12| 11 |
+| EGTR   | Ext. Out 13/14| 13 |
+| HOOK   | Ext. Out 15/16| 15 |
+
+To use different outputs, edit the `returnTracks` array in `config.json`.
 
 ---
 
@@ -77,13 +80,61 @@ This cannot be automated — Ableton's API does not expose Cue Out routing.
 
 ---
 
-## Unmatched Tracks
+## Customizing Your Setup
 
-If any audio tracks don't match a known keyword, they'll be listed in the device UI after the run. You can add keywords to `config.json` to handle them automatically next time.
+Edit `config.json` to tailor ABLEMATION to your rig. All fields are optional — omit any section to keep the built-in defaults.
+
+### Change Return Track Names or Output Channels
+
+```json
+"returnTracks": [
+    { "name": "BAND",  "channel": "1" },
+    { "name": "VOX",   "channel": "3" }
+]
+```
+
+`channel` is matched against the **leading number** of Ableton's output display name. For a mono output labelled "Ext. Out 5", use `"5"`. For a stereo pair "Ext. Out 9-10", use `"9"`.
+
+### Add or Change Keyword Mappings
+
+```json
+"keywordMap": [
+    { "return": "BAND", "keywords": ["band", "synth", "keys", "piano"] },
+    { "return": "VOX",  "keywords": ["vox", "vocal", "lead"] }
+]
+```
+
+Order matters — the first matching entry wins. Keywords use word-boundary matching, so short keywords like `"ag"` won't accidentally match track names like "Stage".
+
+### Change Track Colors
+
+Colors are decimal RGB values (e.g., `16777215` = white, `0` = black).
+
+```json
+"colors": {
+    "returnTracks":  16777215,
+    "masterTrack":   11672627,
+    "sectionsTrack": 0
+}
+```
+
+### Fallback Section Names
+
+If the song has no locators, ABLEMATION creates SECTIONS clips using this list:
+
+```json
+"fallbackSections": ["Intro", "Verse 1", "Chorus 1", "Bridge", "Outro"]
+```
 
 ---
 
-## Track Keyword Map
+## Unmatched Tracks
+
+If any audio tracks don't match a keyword, they'll be listed in the device UI after the run. Add their keywords to `config.json` to handle them automatically next time.
+
+---
+
+## Track Keyword Map (Defaults)
 
 | Keywords | → Return |
 |----------|----------|
@@ -91,9 +142,15 @@ If any audio tracks don't match a known keyword, they'll be listed in the device
 | vox, vocal, lead, bgv, bgvs, background, choir, bv | VOX |
 | click, metronome, met | CLICK |
 | guide, ref, reference, scratch | GUIDE |
-| ltc, timecode, tc, smpte | LTC |
+| ltc, timecode, smpte | LTC |
 | bass, sub | BASS |
 | ag, acoustic | AG |
 | perc, percussion, drum, loop, conga, shaker, tamb, bongo | PERC |
-| egtr, electric, elec, e gtr | EGTR |
+| egtr, electric, elec | EGTR |
 | hook, feature, solo, vamp | HOOK |
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE)
