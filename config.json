@@ -22,7 +22,7 @@
     { "return": "LTC",   "keywords": ["ltc", "timecode", "smpte"] },
     { "return": "BASS",  "keywords": ["bass", "sub"] },
     { "return": "AG",    "keywords": ["ag", "acoustic"] },
-    { "return": "PERC",  "keywords": ["perc", "percussion", "drum", "loop", "conga", "shaker", "tamb", "bongo"] },
+    { "return": "PERC",  "keywords": ["perc", "percussion", "drum", "drums", "loop", "conga", "shaker", "tamb", "bongo"] },
     { "return": "EGTR",  "keywords": ["egtr", "electric", "elec"] },
     { "return": "HOOK",  "keywords": ["hook", "feature", "solo", "vamp"] }
   ],

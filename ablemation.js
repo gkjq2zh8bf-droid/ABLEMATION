@@ -4,18 +4,30 @@ autowatch = 1;
 inlets  = 1;
 outlets = 2; // 0: status text, 1: failure summary
 
-var VERSION = "5.0";
+var VERSION = "5.3";
 
 // ─── Portable paths ───────────────────────────────────────────────────────────
-// Derived from the .amxd file location — works on any machine, any username.
+// Resolved in loadbang() — this.patcher.filepath is not reliable at module scope
+// during autowatch reloads, but is stable inside a function call.
 var DEVICE_FOLDER = "";
-try {
-    DEVICE_FOLDER = this.patcher.filepath.replace(/\/[^\/]+$/, "");
-} catch(e) {
-    post("[ABLEMATION] WARNING: could not determine device folder\n");
+var CONFIG_PATH   = "";
+var LOG_PATH      = "";
+
+function resolvePaths() {
+    try {
+        var fp = this.patcher.filepath;
+        if (fp && fp.length > 0) {
+            DEVICE_FOLDER = fp.replace(/\/[^\/]+$/, "");
+        } else {
+            post("[ABLEMATION] WARNING: patcher.filepath empty — log disabled\n");
+        }
+    } catch(e) {
+        post("[ABLEMATION] WARNING: could not resolve device folder: " + e.message + "\n");
+    }
+    CONFIG_PATH = DEVICE_FOLDER + "/config.json";
+    LOG_PATH    = DEVICE_FOLDER + "/ablemation-log.txt";
+    post("[ABLEMATION] paths resolved — folder: " + DEVICE_FOLDER + "\n");
 }
-var CONFIG_PATH = DEVICE_FOLDER + "/config.json";
-var LOG_PATH    = DEVICE_FOLDER + "/ablemation-log.txt";
 
 // ─── Runtime state ────────────────────────────────────────────────────────────
 var _failures  = [];
@@ -51,7 +63,7 @@ var KEYWORD_MAP = [
     { "return": "LTC",   keywords: ["ltc", "timecode", "smpte"] },
     { "return": "BASS",  keywords: ["bass", "sub"] },
     { "return": "AG",    keywords: ["ag", "acoustic"] },
-    { "return": "PERC",  keywords: ["perc", "percussion", "drum", "loop", "conga", "shaker", "tamb", "bongo"] },
+    { "return": "PERC",  keywords: ["perc", "percussion", "drum", "drums", "loop", "conga", "shaker", "tamb", "bongo"] },
     { "return": "EGTR",  keywords: ["egtr", "electric", "elec"] },
     { "return": "HOOK",  keywords: ["hook", "feature", "solo", "vamp"] }
 ];
@@ -97,6 +109,7 @@ function loadConfig() {
 }
 
 function loadbang() {
+    resolvePaths();
     loadConfig();
     outlet(0, "v" + VERSION + " — click SETUP SESSION to begin");
 }
@@ -442,6 +455,14 @@ function step5_createSections() {
     var sections = new LiveAPI("live_set tracks 0");
     sections.set("name", "SECTIONS");
     sections.set("color", COLOR_SECTIONS);
+    // Collapse track height — property lives on Track.view, not Track itself
+    var sectView = new LiveAPI("live_set tracks 0 view");
+    if (sectView.id && sectView.id != 0) {
+        sectView.set("is_collapsed", 1);
+        appendLog("  SECTIONS view id=" + sectView.id + " — is_collapsed set");
+    } else {
+        appendLog("  SECTIONS view not accessible — track height not collapsed");
+    }
     log("  Step 5 done.");
 }
 
@@ -507,9 +528,17 @@ function step6_buildArrangementClips(cues) {
 // ─── Step 7: Replace locators with song title + STOP ──────────────────────────
 //
 // Live 12 locator API: set_or_delete_cue() toggles a locator at current_song_time.
-// CRITICAL: rapid-fire calls in a loop silently fail — Live 12 only processes one
-// per event-loop tick. _delTask is module-scope to prevent garbage collection
-// from killing the loop mid-run.
+// One call processed per event-loop tick — _delTask at module scope prevents GC.
+//
+// KEY LIVE 12 CONSTRAINT: when exactly 1 cue exists, set_or_delete_cue ALWAYS
+// deletes regardless of position. This makes it impossible to go from count=0 to
+// count=2 using sequential calls — the second call sees count=1 and deletes the
+// first cue instead of creating a second.
+//
+// STRATEGY: preserve the first and last original locator throughout deletion so
+// count never falls below 2. After middle cues are gone, swap the last survivor
+// to stopBeat (create there → count+1, then delete old last → back to 2), then
+// rename first=title and last=STOP.
 
 function step7_replaceLocators(cues, onDone) {
     log("Step 7: Replacing locators...");
@@ -536,70 +565,160 @@ function step7_replaceLocators(cues, onDone) {
     var wasPlayingRaw = liveSet.get("is_playing");
     if (wasPlayingRaw && wasPlayingRaw[0] === 1) liveSet.call("stop_playing");
 
-    var deleteQueue = [];
-    for (var i = 0; i < cues.length; i++) deleteQueue.push(cues[i].time);
-    appendLog("Step 7: " + deleteQueue.length + " locators queued for deletion");
+    // Read all cue positions fresh, sorted ascending.
+    var allPositions = [];
+    var cueCount = liveSet.getcount("cue_points");
+    for (var i = 0; i < cueCount; i++) {
+        var tRaw = new LiveAPI("live_set cue_points " + i).get("time");
+        if (tRaw && tRaw.length > 0) allPositions.push(parseFloat(tRaw[0]));
+    }
+    allPositions.sort(function(a, b) { return a - b; });
+    appendLog("Step 7: " + allPositions.length + " locators found");
 
-    var deleteIdx = 0;
-
-    function runCreate() {
-        appendLog("Step 7: " + liveSet.getcount("cue_points") + " remain after delete pass");
-
-        // Create song title locator at beat 0
-        var pre0 = liveSet.getcount("cue_points");
+    // Edge case: 0 locators — nothing to preserve, fall back to same-tick attempt.
+    if (allPositions.length === 0) {
+        appendLog("Step 7: no locators — same-tick fallback");
         liveSet.set("current_song_time", 0.0);
         liveSet.call("set_or_delete_cue");
-        var post0 = liveSet.getcount("cue_points");
-        appendLog("Step 7: beat-0 count " + pre0 + " -> " + post0);
-
-        if (post0 > pre0) {
-            for (var j = 0; j < post0; j++) {
-                var cp0 = new LiveAPI("live_set cue_points " + j);
-                var t0  = cp0.get("time");
-                if (t0 && t0 !== 0 && t0.length > 0 && Math.abs(parseFloat(t0[0])) < 0.5) {
-                    cp0.set("name", songTitle);
-                    break;
-                }
-            }
-        } else {
-            reportFailure("Song title locator not created at beat 0");
-        }
-
-        // Create STOP locator at actual song end
-        var preS = liveSet.getcount("cue_points");
         liveSet.set("current_song_time", stopBeat);
         liveSet.call("set_or_delete_cue");
-        var postS = liveSet.getcount("cue_points");
-        appendLog("Step 7: stop-beat count " + preS + " -> " + postS);
+        appendLog("Step 7: fallback count=" + liveSet.getcount("cue_points"));
+        _delTask = new Task(runName);
+        _delTask.schedule(400);
+        return;
+    }
 
-        if (postS > preS) {
-            for (var k = 0; k < postS; k++) {
-                var cpS = new LiveAPI("live_set cue_points " + k);
-                var tS  = cpS.get("time");
-                if (tS && tS !== 0 && tS.length > 0 && Math.abs(parseFloat(tS[0]) - stopBeat) < 0.5) {
-                    cpS.set("name", "STOP");
-                    break;
-                }
-            }
+    // Edge case: exactly 1 locator — count=1 trap makes second creation impossible.
+    if (allPositions.length === 1) {
+        reportFailure("Session has only one locator — cannot safely create title + STOP (Live 12 API limitation). Add a second locator manually and re-run.");
+        liveSet.set("current_song_time", savedTime);
+        if (onDone) onDone();
+        return;
+    }
+
+    // Normal path (≥2 locators): preserve first and last, delete middle cues only.
+    // Count never drops below 2, so the count=1 always-delete rule never fires.
+    var anchorFirst = allPositions[0];
+    var anchorLast  = allPositions[allPositions.length - 1];
+
+    var deleteQueue = [];
+    for (var j = 1; j < allPositions.length - 1; j++) {
+        deleteQueue.push(allPositions[j]);
+    }
+    appendLog("Step 7: keep beat-" + anchorFirst + " + beat-" + anchorLast + "; deleting " + deleteQueue.length + " middle cue(s)");
+
+    var deleteIdx = 0;
+    var retryBeat = null;
+
+    function runName() {
+        _delTask = null;
+        var count = liveSet.getcount("cue_points");
+        appendLog("Step 7: naming pass — " + count + " cues:");
+
+        var sorted = [];
+        for (var i = 0; i < count; i++) {
+            var cp   = new LiveAPI("live_set cue_points " + i);
+            var tArr = cp.get("time");
+            var nArr = cp.get("name");
+            var beat = (tArr && tArr.length > 0) ? parseFloat(tArr[0]) : -1;
+            var name = (nArr && nArr.length > 0) ? String(nArr[0]) : "";
+            appendLog("  cue[" + i + "] beat=" + beat + " name=\"" + name + "\"");
+            if (beat >= 0) sorted.push({ beat: beat, cp: cp });
+        }
+        sorted.sort(function(a, b) { return a.beat - b.beat; });
+
+        if (sorted.length === 0) {
+            reportFailure("No cues found after creation pass");
+            liveSet.set("current_song_time", savedTime);
+            log("  No locators | final count: " + count);
+            if (onDone) onDone();
+            return;
+        }
+
+        var first = sorted[0];
+        first.cp.set("name", songTitle);
+        var vArr = first.cp.get("name");
+        appendLog("  named beat-" + first.beat + " as title: verify=" + (vArr && vArr.length ? String(vArr[0]) : "null"));
+
+        var last = sorted[sorted.length - 1];
+        if (last.beat !== first.beat) {
+            last.cp.set("name", "STOP");
+            var vArrS = last.cp.get("name");
+            appendLog("  named beat-" + last.beat + " as STOP: verify=" + (vArrS && vArrS.length ? String(vArrS[0]) : "null"));
         } else {
-            reportFailure("STOP locator not created at beat " + stopBeat);
+            reportFailure("Only one cue — STOP locator missing");
+        }
+
+        if (sorted.length > 2) {
+            var extras = [];
+            for (var j = 1; j < sorted.length - 1; j++) extras.push("beat " + sorted[j].beat);
+            reportFailure(extras.length + " locator(s) could not be deleted — remove manually: " + extras.join(", "));
         }
 
         liveSet.set("current_song_time", savedTime);
-        log("  \"" + songTitle + "\" + STOP | final count: " + liveSet.getcount("cue_points"));
+        log("  \"" + songTitle + "\" + STOP | final count: " + count);
         if (onDone) onDone();
     }
 
-    _delTask = new Task(function() {
-        if (deleteIdx < deleteQueue.length) {
-            liveSet.set("current_song_time", deleteQueue[deleteIdx]);
+    function runCreate() {
+        var cnt = liveSet.getcount("cue_points");
+        appendLog("Step 7: " + cnt + " remain — swapping anchor-last to stopBeat");
+
+        if (Math.abs(anchorLast - stopBeat) > 0.5) {
+            // anchorLast is not at stopBeat — create at stopBeat (count→cnt+1),
+            // then delete anchorLast (count→cnt), leaving first + stopBeat.
+            liveSet.set("current_song_time", stopBeat);
             liveSet.call("set_or_delete_cue");
-            appendLog("  del[" + deleteIdx + "] beat=" + deleteQueue[deleteIdx] + " remain=" + liveSet.getcount("cue_points"));
-            deleteIdx++;
+            appendLog("  created STOP at beat " + stopBeat + " count=" + liveSet.getcount("cue_points"));
+
+            _delTask = new Task(function() {
+                _delTask = null;
+                liveSet.set("current_song_time", anchorLast);
+                liveSet.call("set_or_delete_cue");
+                appendLog("  removed anchor-last beat=" + anchorLast + " count=" + liveSet.getcount("cue_points"));
+                _delTask = new Task(runName);
+                _delTask.schedule(200);
+            });
+            _delTask.schedule(100);
         } else {
-            _delTask.cancel();
-            _delTask = null;
+            // anchorLast is already at stopBeat — nothing to swap
+            appendLog("  anchor-last already at stopBeat — no swap needed");
+            _delTask = new Task(runName);
+            _delTask.schedule(200);
+        }
+    }
+
+    _delTask = new Task(function() {
+        var beat;
+        var isRetry = (retryBeat !== null);
+
+        if (isRetry) {
+            beat      = retryBeat;
+            retryBeat = null;
+        } else if (deleteIdx < deleteQueue.length) {
+            beat = deleteQueue[deleteIdx];
+        } else {
+            _delTask.cancel(); _delTask = null;
             runCreate();
+            return;
+        }
+
+        var preCnt = liveSet.getcount("cue_points");
+        liveSet.set("current_song_time", beat);
+        liveSet.call("set_or_delete_cue");
+        var postCnt = liveSet.getcount("cue_points");
+
+        if (postCnt >= preCnt) {
+            if (!isRetry) {
+                retryBeat = beat;
+                appendLog("  WARN[" + deleteIdx + "] beat=" + beat + " created — retry next tick");
+            } else {
+                appendLog("  SKIP[" + deleteIdx + "] beat=" + beat + " (retry also created — skipping)");
+                deleteIdx++;
+            }
+        } else {
+            appendLog("  del[" + deleteIdx + "] beat=" + beat + " remain=" + postCnt);
+            deleteIdx++;
         }
     });
     _delTask.interval = 50;
